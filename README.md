@@ -1,4 +1,17 @@
-# JackIt
+# JackIt with Auto-Jacker
+This fork adds Auto-Jacker mode `(--auto-jacker)` providing fully automated payload injection. Instead of manually selecting targets after scanning, Auto-Jacker continuously monitors for new devices and automatically executes payloads against them as they are discovered.
+### Key Features:
+- Continuous Operation: Automatically attacks new devices as they appear, perfect for long-running assessments
+- Smart Targeting: Tracks previously attacked devices to prevent duplicate injections
+- Real-time Status: Color-coded display shows attack success/failure status for each device
+- Attack Statistics: Live counters showing total devices found, successful attacks, and failures
+
+### Usage:
+```bash
+sudo jackit --auto-jacker --script /path/to/payload.txt
+```
+
+# JackIt README
 
 _Do you like JackIt but don't want to carry around a laptop? Check [this](https://github.com/phikshun/uC_mousejack) out._
 
