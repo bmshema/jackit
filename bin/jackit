@@ -10,6 +10,11 @@ import datetime
 import platform
 import click
 import tabulate
+import threading
+try:
+    import queue
+except ImportError:
+    import Queue as queue
 from jackit import duckyparser
 from jackit import mousejack
 from jackit import keylogger
@@ -195,6 +200,188 @@ def _print_err(text):
     print(R + '[!] ' + W + text)
 
 
+def get_input_with_timeout(prompt, timeout):
+    """Get user input with timeout. Returns None if timeout occurs."""
+    result_queue = queue.Queue()
+    
+    def input_thread():
+        try:
+            if sys.version_info[0] >= 3:
+                user_input = input(prompt)
+            else:
+                user_input = raw_input(prompt)
+            result_queue.put(user_input)
+        except (EOFError, KeyboardInterrupt):
+            result_queue.put(None)
+    
+    # Start input thread
+    thread = threading.Thread(target=input_thread)
+    thread.daemon = True
+    thread.start()
+    
+    # Wait for input or timeout
+    try:
+        return result_queue.get(timeout=timeout)
+    except queue.Empty:
+        # Timeout occurred
+        return None
+
+
+def list_payload_files(payloads_dir):
+    """Scan payload directory and return list of available payload files"""
+    payload_files = []
+    
+    if not payloads_dir or not os.path.exists(payloads_dir):
+        return payload_files
+    
+    # Walk through the directory recursively to find .txt files
+    for root, dirs, files in os.walk(payloads_dir):
+        for file in files:
+            if file.endswith('.txt') and not file.startswith('.'):
+                full_path = os.path.join(root, file)
+                # Get relative path from payloads directory
+                rel_path = os.path.relpath(full_path, payloads_dir)
+                payload_files.append({
+                    'index': len(payload_files) + 1,
+                    'name': file,
+                    'path': full_path,
+                    'relative_path': rel_path,
+                    'size': os.path.getsize(full_path)
+                })
+    
+    return sorted(payload_files, key=lambda x: x['relative_path'])
+
+
+def display_payloads(payload_files):
+    """Display available payloads in a formatted table"""
+    if not payload_files:
+        print(R + "[-] " + W + "No payload files found in specified directory")
+        return
+    
+    print(GR + "\n[+] " + W + "Available Payloads:")
+    print("")
+    
+    pretty_payloads = []
+    for payload in payload_files:
+        pretty_payloads.append([
+            payload['index'],
+            payload['name'],
+            payload['relative_path'],
+            f"{payload['size']} bytes"
+        ])
+    
+    print(tabulate.tabulate(pretty_payloads, headers=["ID", "NAME", "PATH", "SIZE"]))
+
+
+def dynamic_scan_loop(jack, interval, targeted, address, payloads_dir, layout):
+    """Enhanced scan loop for dynamic mode with device and payload selection"""
+    # Get available payloads
+    payload_files = list_payload_files(payloads_dir)
+    
+    if targeted:
+        jack.sniff(interval, address)
+    else:
+        jack.scan(interval)
+
+    click.clear()
+    if targeted:
+        print(GR + "[+] " + W + ("Dynamic mode - Sniffing for %s every %ds" % (address, interval)))
+    else:
+        print(GR + "[+] " + W + ("Dynamic mode - Scanning every %ds" % interval))
+    
+    print(P + "[DYNAMIC] " + W + "Select device and payload combinations. " + O + "Auto-refresh every %ds" % interval + W + ". Type " + R + "'quit' " + W + "to exit.")
+    print("")
+
+    # Display devices table
+    pretty_devices = []
+    for addr_string, device in iteritems(jack.devices):
+        if device['device']:
+            device_name = device['device'].description()
+            status = G + "INJECTABLE" + W
+        else:
+            device_name = 'Unknown'
+            status = R + "NOT INJECTABLE" + W
+            
+        pretty_devices.append([
+            device['index'],
+            addr_string,
+            ",".join(str(x) for x in device['channels']),
+            device['count'],
+            str(datetime.timedelta(seconds=int(time.time() - device['timestamp']))) + ' ago',
+            device_name,
+            status
+        ])
+
+    if pretty_devices:
+        print(tabulate.tabulate(pretty_devices, headers=["DEVICE ID", "ADDRESS", "CHANNELS", "COUNT", "SEEN", "TYPE", "STATUS"]))
+    else:
+        print(R + "[-] " + W + "No devices detected yet...")
+    
+    # Display payloads
+    display_payloads(payload_files)
+    
+    return payload_files
+
+
+def execute_dynamic_attack(jack, device_id, payload_id, payload_files, layout):
+    """Execute attack with selected device and payload"""
+    # Find the selected device
+    selected_device = None
+    selected_addr = None
+    
+    for addr_string, device in iteritems(jack.devices):
+        if device['index'] == device_id:
+            selected_device = device
+            selected_addr = addr_string
+            break
+    
+    if not selected_device:
+        print(R + "[-] " + W + f"Device ID {device_id} not found")
+        return False
+    
+    if not selected_device['device']:
+        print(R + "[-] " + W + f"Device {selected_addr} is not injectable")
+        return False
+    
+    # Find the selected payload
+    selected_payload = None
+    for payload in payload_files:
+        if payload['index'] == payload_id:
+            selected_payload = payload
+            break
+    
+    if not selected_payload:
+        print(R + "[-] " + W + f"Payload ID {payload_id} not found")
+        return False
+    
+    # Load and parse the payload
+    try:
+        print(O + "[*] " + W + f"Loading payload: {selected_payload['name']}")
+        with open(selected_payload['path'], 'r') as f:
+            script_content = f.read()
+        
+        parser = duckyparser.DuckyParser(script_content, layout=layout.lower())
+        attack = parser.parse()
+        
+        print(O + "[*] " + W + f"Attacking device: {selected_addr} [{selected_device['device'].description()}]")
+        print(O + "[*] " + W + f"Using payload: {selected_payload['relative_path']}")
+        
+        # Execute the attack
+        targets = {selected_addr: selected_device}
+        success = launch_attacks(jack, targets, attack)
+        
+        if success:
+            print(G + "[+] " + W + f"Attack completed successfully!")
+        else:
+            print(R + "[-] " + W + f"Attack failed")
+        
+        return success
+        
+    except Exception as e:
+        print(R + "[-] " + W + f"Error executing attack: {str(e)}")
+        return False
+
+
 def banner():
     print(r"""
      ____.              __   .___  __
@@ -230,7 +417,9 @@ def confirm_root():
 @click.option('--auto-jacker', is_flag=True, help="Automatically attack devices as they are detected")
 @click.option('--all-channels', is_flag=True, help="Send attack to all detected channels")
 @click.option('--keylogging', is_flag=True, help="Log keystrokes for XOR encrypted MS keyboards")
-def cli(debug, script, lowpower, interval, layout, address, vendor, reset, autopwn, auto_jacker, all_channels, keylogging):
+@click.option('--dynamic', is_flag=True, help="Enable dynamic mode for interactive device and payload selection")
+@click.option('--payloads', default="", help="Directory containing payload files for dynamic mode", type=click.Path())
+def cli(debug, script, lowpower, interval, layout, address, vendor, reset, autopwn, auto_jacker, all_channels, keylogging, dynamic, payloads):
 
     banner()
     confirm_root()
@@ -253,8 +442,20 @@ def cli(debug, script, lowpower, interval, layout, address, vendor, reset, autop
         else:
             targeted = True
 
+    # dynamic mode requirements
+    if dynamic:
+        if not payloads:
+            _print_err("Dynamic mode requires --payloads <directory> to specify payload directory")
+            exit(-1)
+        if not os.path.exists(payloads):
+            _print_err(f"Payloads directory does not exist: {payloads}")
+            exit(-1)
+        if not os.path.isdir(payloads):
+            _print_err(f"Payloads path is not a directory: {payloads}")
+            exit(-1)
+
     if script == "":
-        if not keylogging and not auto_jacker:
+        if not keylogging and not auto_jacker and not dynamic:
             _print_err("You must supply a ducky script using --script <filename>")
             _print_err("Attacks are disabled.")
         attack = ""
@@ -299,7 +500,7 @@ def cli(debug, script, lowpower, interval, layout, address, vendor, reset, autop
                     _print_err('No devices found')
                 jack.clear_devices()
 
-        # New auto-jacker mode
+        # auto-jacker mode
         if auto_jacker:
             if not attack:
                 _print_err('No attack script specified for auto-jacker. Exiting.')
@@ -334,6 +535,99 @@ def cli(debug, script, lowpower, interval, layout, address, vendor, reset, autop
                 failed_attacks = len([k for k, v in attacked_devices.items() if v['status'] == 'FAILED'])
                 print(f"{GR}[SUMMARY]{W} Successful attacks: {successful_attacks}")
                 print(f"{GR}[SUMMARY]{W} Failed attacks: {failed_attacks}")
+                exit(0)
+
+        # dynamic mode
+        if dynamic:
+            print(G + "[+] " + W + 'Starting dynamic mode...')
+            print(GR + "[INFO] " + W + 'Interactive device and payload selection.')
+            print(GR + "[INFO] " + W + 'Press CTRL-C to refresh scan, type "quit" to exit.')
+            print("")
+
+            if targeted:
+                print(G + "[+] " + W + 'Starting targeted sniff for %s...' % address)
+                if vendor.startswith("l"):
+                    jack.add_device(address, [0, 0xC2, 0, 0, 0, 0, 0, 0, 0, 0])
+                if vendor.startswith("m"):
+                    jack.add_device(address, [])
+                if vendor.startswith("a"):
+                    jack.add_device(address, [0, 0, 0, 0, 0, 0])
+            else:
+                print(G + "[+] " + W + 'Starting dynamic scan...')
+
+            try:
+                while True:
+                    # Scan and display devices and payloads
+                    payload_files = dynamic_scan_loop(jack, interval, targeted, address, payloads, layout)
+                    
+                    if len(jack.devices) == 0:
+                        print(f"\n{R}[-]{W} No devices found. Auto-refreshing in {interval}s...")
+                        time.sleep(interval)
+                        continue
+                    
+                    if not payload_files:
+                        print(f"\n{R}[-]{W} No payload files found in {payloads}")
+                        time.sleep(interval)
+                        continue
+                    
+                    # Get user selection with timeout
+                    print(f"\n{GR}[SELECT]{W} Enter device ID and payload ID (e.g., '1 3' for device 1, payload 3)")
+                    print(f"{GR}[SELECT]{W} Or type 'quit' to exit. Auto-refresh in {interval}s...")
+                    
+                    try:
+                        # Use timeout-based input
+                        user_input = get_input_with_timeout(f'{P}Device,Payload{W}: ', interval)
+                        
+                        if user_input is None:
+                            # Timeout occurred, refresh display
+                            continue
+                        
+                        user_input = user_input.strip().lower()
+                        
+                        if user_input == 'quit' or user_input == 'exit':
+                            break
+                        
+                        if user_input == '' or user_input == 'refresh':
+                            continue
+                        
+                        # Parse device and payload selection
+                        try:
+                            parts = user_input.split()
+                            if len(parts) != 2:
+                                print(f"{R}[-]{W} Invalid format. Use: device_id payload_id (e.g., '1 3')")
+                                time.sleep(2)
+                                continue
+                            
+                            device_id = int(parts[0])
+                            payload_id = int(parts[1])
+                            
+                            # Execute the attack
+                            print(f"\n{O}[*]{W} Executing attack...")
+                            success = execute_dynamic_attack(jack, device_id, payload_id, payload_files, layout)
+                            
+                            if success:
+                                print(f"{G}[+]{W} Attack completed! Press Enter to continue...")
+                            else:
+                                print(f"{R}[-]{W} Attack failed! Press Enter to continue...")
+                            
+                            # Brief pause, let user see result, then continue
+                            time.sleep(3)
+                            
+                        except ValueError:
+                            print(f"{R}[-]{W} Invalid input. Device and payload IDs must be numbers.")
+                            time.sleep(2)
+                            continue
+                        except Exception as e:
+                            print(f"{R}[-]{W} Error: {str(e)}")
+                            time.sleep(2)
+                            continue
+                    
+                    except KeyboardInterrupt:
+                        # CTRL-C pressed
+                        continue
+                    
+            except KeyboardInterrupt:
+                print(f"\n\n{G}[+]{W} Dynamic mode stopped.")
                 exit(0)
 
         if targeted:
