@@ -1,5 +1,9 @@
-# JackIt with Auto-Jacker
-This fork adds Auto-Jacker mode `(--auto-jacker)` providing fully automated payload injection. Instead of manually selecting targets after scanning, Auto-Jacker continuously monitors for new devices and automatically executes payloads against them as they are discovered.
+# JackIt with Auto-Jacker and Dynamic Mode
+This fork adds two new modes to JackIt:
+
+## Auto-Jacker Mode (`--auto-jacker`)
+Provides fully automated payload injection. Instead of manually selecting targets after scanning, Auto-Jacker continuously monitors for new devices and automatically executes payloads against them as they are discovered. (like `--autopwn`, but in table format)
+
 ### Key Features:
 - Continuous Operation: Automatically attacks new devices as they appear, perfect for long-running assessments
 - Smart Targeting: Tracks previously attacked devices to prevent duplicate injections
@@ -10,6 +14,30 @@ This fork adds Auto-Jacker mode `(--auto-jacker)` providing fully automated payl
 ```bash
 sudo jackit --auto-jacker --script /path/to/payload.txt
 ```
+
+## Dynamic Mode (`--dynamic`)
+Provides interactive device and payload selection during runtime. Instead of pre-specifying a single payload, Dynamic Mode allows you to choose different payloads for different devices as they are discovered.
+
+### Key Features:
+- Interactive Selection: Choose devices and payloads dynamically during operation
+- Payload Directory Scanning: Automatically discovers all .txt payload files in specified directory
+- Continuous Operation: Scan, select, attack, repeat - perfect for testing multiple payloads
+- Auto-Refresh Display: Automatically refreshes device scan every interval (default 5s)
+- Payload Organization: Supports nested directories for organized payload management
+
+### Usage:
+```bash
+sudo jackit --dynamic --payloads /path/to/payloads/directory
+```
+
+### Dynamic Mode Interface:
+1. **Device Table**: Shows detected devices with IDs, addresses, and injection status
+2. **Payload Table**: Lists available payloads from specified directory with IDs and paths
+3. **Interactive Selection**: Enter device ID and payload ID (e.g., "1 3" for device 1, payload 3)
+4. **Commands**:
+   - `quit` or `exit`: Exit dynamic mode
+   - `<device_id> <payload_id>`: Execute attack (e.g., "2 5")
+   - Auto-refresh: Display automatically updates every scan interval
 
 # JackIt README
 
